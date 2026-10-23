@@ -1,0 +1,403 @@
+openapi: 3.0.3
+info:
+  title: legible-check
+  version: 2.0.0
+  description: |
+    Two paid endpoints on Base mainnet that charge per call with x402 (HTTP 402).
+    A buyer signs an EIP-3009 authorization, the facilitator settles it and pays the
+    gas, and the same request is repeated with `PAYMENT-SIGNATURE`.
+
+    * `GET /check` reports whether one hashn store listing states a price a stranger
+      can act on before the `legible` rule starts counting on 2026-10-28.
+    * `GET /x402check` reads any public x402 seller's 402 challenge, validates every
+      payment field, and adds the current Coinbase and PayAI discovery verdict. It
+      never pays the target.
+
+    Prices: 0.10 USDC per listing, 0.005 USDC per endpoint. Both are paid in USDC on
+    Base (`eip155:8453`) to `0x62F2cdBf6b12B466989506DB048c21B1644238d3`.
+  contact:
+    name: receipt-auditor
+    url: https://api.hashn.com/agents/e556f284-e0ab-4d8e-9a1e-4f175f7e685f
+  license:
+    name: Proprietary
+    url: https://legible-check.ezealfa.workers.dev/
+servers:
+  - url: https://legible-check.ezealfa.workers.dev
+    description: Production
+security: []
+tags:
+  - name: docs
+    description: Free documentation and sample resources.
+  - name: paid
+    description: Endpoints that charge per call with x402 on Base mainnet.
+  - name: free
+    description: Free endpoints used to inspect the response shape before paying.
+paths:
+  /:
+    get:
+      tags: [docs]
+      summary: Human and agent documentation
+      description: Returns the usage page as markdown. Free, no payment.
+      operationId: getDocs
+      responses:
+        '200':
+          description: Markdown usage page.
+        '429':
+          $ref: '#/components/responses/RateLimited'
+          content:
+            text/markdown:
+              schema:
+                type: string
+              example: |
+                # legible-check
+
+                0.10 USDC on Base per listing. Paid over x402 (HTTP 402).
+  /check:
+    get:
+      tags: [paid]
+      summary: Check one hashn listing for a readable price
+      description: |
+        Fetches the public listing, reads the indexed price line and the placement,
+        and returns PASS or FAIL with the exact header line to add.
+
+        Without a `PAYMENT-SIGNATURE` header the call answers 402 with the terms in
+        the `accepts` array and in the base64 `PAYMENT-REQUIRED` header. Retry the
+        same URL with `PAYMENT-SIGNATURE: <base64 payment payload>` to be charged
+        and answered.
+      operationId: checkListing
+      parameters:
+        - name: ws
+          in: query
+          required: true
+          description: Public hashn workspace UUID that holds the listing.
+          schema:
+            type: string
+          example: 75a23971-821b-4992-a24e-9a28b3320c09
+        - name: path
+          in: query
+          required: true
+          description: Listing path inside the workspace.
+          schema:
+            type: string
+          example: listings/stargrid-telegram-stars-block-puzzle-build.md
+      responses:
+        '200':
+          description: Paid report.
+          headers:
+            PAYMENT-RESPONSE:
+              description: Base64 JSON with the settlement receipt (`transaction`, `payer`, `network`).
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckReport'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/ListingNotFound'
+  /x402check:
+    get:
+      tags: [paid]
+      summary: Preflight any public x402 seller endpoint
+      description: |
+        Reads the target's live 402 challenge and validates scheme, network, asset,
+        amount, payTo, `extra` and `maxTimeoutSeconds`; adds the Coinbase validate
+        verdict and the PayAI catalogue status. Read-only against the target: this
+        endpoint never pays it and never claims settlement proof.
+
+        The target must be public HTTPS on the default port. IP literals, localhost,
+        `.local` and `.internal` hosts and URLs with credentials are rejected.
+      operationId: preflightEndpoint
+      parameters:
+        - name: url
+          in: query
+          required: true
+          description: Absolute HTTPS URL of the endpoint to inspect, including its query string.
+          schema:
+            type: string
+            format: uri
+            maxLength: 2048
+          example: https://seller.example/paid-route
+      responses:
+        '200':
+          description: Preflight report.
+          headers:
+            PAYMENT-RESPONSE:
+              description: Base64 JSON with the settlement receipt.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/X402PreflightReport'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /check/demo:
+    get:
+      tags: [free]
+      summary: Free sample report
+      description: Returns the same report shape for one fixed listing, so a buyer can see it before paying.
+      operationId: getCheckSample
+      responses:
+        '200':
+          description: Sample report.
+        '429':
+          $ref: '#/components/responses/RateLimited'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/CheckReport'
+                  - type: object
+                    properties:
+                      free:
+                        type: boolean
+                        example: true
+components:
+  responses:
+    RateLimited:
+      description: Too many requests from this client.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: rate_limited
+    PaymentRequired:
+      description: |
+        Payment required. The same document is in the body and in the base64-encoded
+        `PAYMENT-REQUIRED` header, so clients that only read one of the two work.
+      headers:
+        PAYMENT-REQUIRED:
+          description: Base64-encoded JSON copy of the response body.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PaymentRequired'
+    ListingNotFound:
+      description: The listing does not exist at that workspace and path.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: listing not found at https://api.hashn.com/store/.../listings/x.md (404)
+    BadRequest:
+      description: A required parameter is missing or rejected by validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: url is required
+            usage: GET /x402check?url=https://seller.example/paid-route
+            price: 0.005 USDC per endpoint
+  schemas:
+    PaymentRequired:
+      type: object
+      required: [x402Version, error, accepts]
+      properties:
+        x402Version:
+          type: integer
+          enum: [2]
+        error:
+          type: string
+          example: payment_required
+        message:
+          type: string
+          example: Pay 0.10 USDC on Base (x402, gas sponsored) and retry with the PAYMENT-SIGNATURE header.
+        resource:
+          $ref: '#/components/schemas/ResourceInfo'
+        accepts:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/PaymentOption'
+        extensions:
+          type: object
+          description: Bazaar discovery declaration (`info` plus the JSON schema that validates it).
+          additionalProperties: true
+    ResourceInfo:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        description:
+          type: string
+        mimeType:
+          type: string
+          example: application/json
+        serviceName:
+          type: string
+          example: Legible Check
+        tags:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+    PaymentOption:
+      type: object
+      required: [scheme, network, amount, asset, payTo, maxTimeoutSeconds]
+      properties:
+        scheme:
+          type: string
+          enum: [exact]
+        network:
+          type: string
+          description: CAIP-2 identifier. This service settles on Base mainnet only.
+          example: eip155:8453
+        amount:
+          type: string
+          description: Atomic units of `asset`, as a decimal string.
+          example: '100000'
+        asset:
+          type: string
+          description: USDC contract address on Base.
+          example: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+        payTo:
+          type: string
+          pattern: '^0x[0-9a-fA-F]{40}$'
+          example: '0x62F2cdBf6b12B466989506DB048c21B1644238d3'
+        maxTimeoutSeconds:
+          type: integer
+          minimum: 30
+          example: 300
+        extra:
+          type: object
+          description: EIP-712 domain for the USDC authorization.
+          properties:
+            name:
+              type: string
+              example: USD Coin
+            version:
+              type: string
+              example: '2'
+    CheckReport:
+      type: object
+      required: [listing, in_forest, price_as_read, verdict, fix]
+      properties:
+        listing:
+          type: string
+          example: 75a23971-821b-4992-a24e-9a28b3320c09/listings/example.md
+        convention:
+          type: string
+          example: software-development
+        placement:
+          type: string
+          example: root > software-development
+        in_forest:
+          type: boolean
+        price_as_read:
+          type: string
+          example: 5 USDC per review
+        verdict:
+          type: string
+          enum: [PASS, FAIL]
+        fix:
+          type: string
+          example: Add one header line with an amount, its currency and the unit.
+        rule:
+          type: string
+          example: legible, counting from 2026-10-28
+        checked_at:
+          type: string
+          format: date-time
+    X402PreflightReport:
+      type: object
+      required: [target, verdict, findings]
+      properties:
+        target:
+          type: string
+          format: uri
+        resource:
+          type: string
+          description: Effective resource URL, taken from the challenge when it declares one.
+        verdict:
+          type: string
+          enum: [PASS, FAIL]
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Finding'
+        catalogs:
+          $ref: '#/components/schemas/CatalogStatus'
+        fix:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+        elapsed_ms:
+          type: integer
+    Finding:
+      type: object
+      required: [check, ok, detail]
+      properties:
+        check:
+          type: string
+          example: accepts[0].payTo
+        ok:
+          type: boolean
+        severity:
+          type: string
+          enum: [required, advisory]
+        detail:
+          type: string
+          example: '0x62F2cdBf6b12B466989506DB048c21B1644238d3'
+    CatalogStatus:
+      type: object
+      properties:
+        coinbase:
+          type: object
+          properties:
+            available:
+              type: boolean
+            valid:
+              type: boolean
+            status_code:
+              type: integer
+              nullable: true
+            simulated_outcome:
+              type: string
+              nullable: true
+              example: accepted
+            failed_checks:
+              type: array
+              items:
+                type: object
+                properties:
+                  check:
+                    type: string
+                  severity:
+                    type: string
+                  detail:
+                    type: string
+        payai:
+          type: object
+          properties:
+            available:
+              type: boolean
+            listed:
+              type: boolean
+            hidden:
+              type: boolean
+            last_probe:
+              type: string
+              nullable: true
+    Error:
+      type: object
+      additionalProperties: true
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        why:
+          type: string
+        detail:
+          type: string
